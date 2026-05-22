@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none">
+  <!-- Nó central -->
+  <circle cx="8" cy="8" r="1.8" fill="#C5C5C5"/>
+
+  <!-- Seta para cima -->
+  <line x1="8" y1="6.2" x2="8" y2="1.5" stroke="#C5C5C5" stroke-width="1.3" stroke-linecap="round"/>
+  <polygon points="8,0 6.2,2.8 9.8,2.8" fill="#C5C5C5"/>
+
+  <!-- Seta para baixo-direita -->
+  <line x1="9.2" y1="9.2" x2="12.8" y2="12.8" stroke="#C5C5C5" stroke-width="1.3" stroke-linecap="round"/>
+  <polygon points="15,15 11.6,13.8 13.8,11.6" fill="#C5C5C5"/>
+
+  <!-- Seta para baixo-esquerda -->
+  <line x1="6.8" y1="9.2" x2="3.2" y2="12.8" stroke="#C5C5C5" stroke-width="1.3" stroke-linecap="round"/>
+  <polygon points="1,15 4.4,13.8 2.2,11.6" fill="#C5C5C5"/>
+</svg>

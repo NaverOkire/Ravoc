@@ -1,29 +1,42 @@
 import * as vscode from 'vscode';
 import { RavocWatcher } from './watcher';
 import { RavocClient } from './client';
+import { RavocPanel } from './RavocPanel';
+import { logger } from './logger';
 
 export function activate(context: vscode.ExtensionContext) {
-    const outputChannel = vscode.window.createOutputChannel('RAVOC');
-    context.subscriptions.push(outputChannel);
+    logger.init(context);
+    logger.info('Extensão ativada.');
 
-    outputChannel.appendLine('[RAVOC] Extensão ativada.');
-
-    const backendUrl = vscode.workspace
-        .getConfiguration('ravoc')
-        .get<string>('backendUrl', 'http://localhost:8000');
-
-    const client = new RavocClient(backendUrl);
-    const watcher = new RavocWatcher(client, context, outputChannel);
+    const client = new RavocClient('http://localhost:8000');
+    const watcher = new RavocWatcher(client, context);
     watcher.register();
 
-    const openPanel = vscode.commands.registerCommand(
-        'ravoc.openPanel',
-        () => vscode.window.showInformationMessage('[RAVOC] Painel em construção no M2.4.')
+    const panelProvider = new RavocPanel(
+        context.extensionUri,
+        'http://localhost:8000'
     );
 
-    context.subscriptions.push(openPanel);
+    context.subscriptions.push(
+        vscode.window.registerWebviewViewProvider(
+            RavocPanel.viewType,
+            panelProvider,
+            { webviewOptions: { retainContextWhenHidden: true } }
+        )
+    );
+
+    // O onDidChangeActiveTextEditor do watcher já loga — aqui só notifica o painel
+    context.subscriptions.push(
+        vscode.window.onDidChangeActiveTextEditor(editor => {
+            if (editor?.document.uri.scheme === 'file') {
+                panelProvider.notifyActiveFileChanged(
+                    vscode.workspace.asRelativePath(editor.document.uri)
+                );
+            }
+        })
+    );
 }
 
-export function deactivate(): void {
-    console.log('[RAVOC] Extensão desativada.');
+export function deactivate() {
+    logger.info('Extensão desativada.');
 }

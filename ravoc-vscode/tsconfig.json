@@ -1,16 +1,15 @@
 {
   "compilerOptions": {
     "module": "Node16",
-    "moduleResolution": "Node16",
     "target": "ES2022",
-    "lib": ["ES2022", "dom"],
-    "types": ["node"],
-    "sourceMap": true,
-    "rootDir": "src",
     "outDir": "out",
+    "rootDir": "src",
     "strict": true,
-    "skipLibCheck": true
-    
+    "lib": ["ES2022", "DOM"],
+    "types": ["node", "mocha"],
+    "sourceMap": true,
+    "resolveJsonModule": true
   },
-  "exclude": ["node_modules", ".vscode-test", "src/test"]
+  "include": ["src/**/*"],
+  "exclude": ["node_modules", ".vscode-test", "webview"]
 }
