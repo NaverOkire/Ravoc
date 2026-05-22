@@ -8,7 +8,7 @@ O projeto encontra-se em **fase inicial de desenvolvimento (Work in Progress)**,
 
 ## 🚀 Funcionalidades Planejadas & Em Desenvolvimento
 
-### 🔌 Extensão VS Code (`ravoc-vscode`)
+### 🔌 Extensão VS Code (`ravoc-vscode`) CONCLUÍDA
 - Interface visual dedicada integrada ao editor.
 - Comunicação direta com o backend local via API.
 - Captura de contexto de arquivos abertos e trechos de código selecionados.
