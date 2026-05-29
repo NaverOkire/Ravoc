@@ -4,6 +4,10 @@ import { getVsCodeApi } from './vscode';
 interface MessageToExtension {
   type: 'sendMessage' | 'ready';
   text?: string;
+  history?: Array<{
+    role: 'user' | 'assistant';
+    content: string;
+  }>;
 }
 
 interface MessageFromExtension {
@@ -83,7 +87,10 @@ export default function App() {
     setMessages(prev => [...prev, { role: 'user', content: text }]);
     setInput('');
     setIsStreaming(true);
-    vscode.postMessage({ type: 'sendMessage', text } satisfies MessageToExtension);
+    const history = messages
+      .filter(msg => !msg.streaming)
+      .map(({ role, content }) => ({ role, content }));
+    vscode.postMessage({ type: 'sendMessage', text, history } satisfies MessageToExtension);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
@@ -117,7 +124,7 @@ export default function App() {
             textAlign: 'center',
             marginTop: '40px',
           }}>
-            JARVIS está pronto. Pergunte sobre o seu código.
+            Ravoc está pronto. Pergunte sobre o seu código.
           </p>
         )}
         {messages.map((msg, i) => (

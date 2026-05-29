@@ -1,22 +1,38 @@
 import * as vscode from 'vscode';
 import * as crypto from 'crypto';
-import * as path from 'path';
-import * as fs from 'fs';
+import { RavocClient } from './client';
+import { ChatMessage } from './types';
+
+const MAX_ACTIVE_FILE_CONTEXT_CHARS = 40000;
 
 export class RavocPanel implements vscode.WebviewViewProvider {
-  // Identificador do painel — deve bater com o package.json
   public static readonly viewType = 'ravoc.chatPanel';
 
   private _view?: vscode.WebviewView;
-  private _ws?: WebSocket;
+
+  // Estado estável do arquivo ativo — atualizado pelo watcher após debounce
+  private _activeFile: string = '';
+  private _activeLanguage: string = '';
+  private _activeFileContent: string = '';
 
   constructor(
     private readonly _extensionUri: vscode.Uri,
-    private readonly _backendUrl: string,
-  ) {}
+    private readonly _client: RavocClient,
+    private readonly _context: vscode.ExtensionContext,
+  ) {
+    this._client.onToken((token) => {
+      this._view?.webview.postMessage({ type: 'responseChunk', chunk: token });
+    });
 
-  // Chamado pelo VS Code quando o painel é exibido pela primeira vez
-  // ou quando é restaurado após um reload
+    this._client.onDone(() => {
+      this._view?.webview.postMessage({ type: 'response' });
+    });
+
+    this._client.onError((message) => {
+      this._view?.webview.postMessage({ type: 'error', text: message });
+    });
+  }
+
   resolveWebviewView(
     webviewView: vscode.WebviewView,
     _context: vscode.WebviewViewResolveContext,
@@ -24,11 +40,8 @@ export class RavocPanel implements vscode.WebviewViewProvider {
   ): void {
     this._view = webviewView;
 
-    // Opções de segurança do WebView
     webviewView.webview.options = {
-      enableScripts: true,   // Obrigatório para React funcionar
-      // Lista branca de URIs locais que o WebView pode carregar
-      // Sem isso, o VS Code bloqueia o bundle JS
+      enableScripts: true,
       localResourceRoots: [
         vscode.Uri.joinPath(this._extensionUri, 'media'),
       ],
@@ -36,101 +49,142 @@ export class RavocPanel implements vscode.WebviewViewProvider {
 
     webviewView.webview.html = this._getHtmlContent(webviewView.webview);
 
-    // Escuta mensagens vindas do React
     webviewView.webview.onDidReceiveMessage(
-      (message: { type: string; text?: string }) => {
+      async (message: {
+        type: string;
+        text?: string;
+        history?: ChatMessage[];
+        lmUrl?: string;
+        lmModel?: string;
+        apiKey?: string;
+      }) => {
+
         if (message.type === 'ready') {
-          // WebView carregou — conectar o WebSocket ao backend
-          this._connectWebSocket();
+          const config = vscode.workspace.getConfiguration('ravoc');
+          const apiKey = await this._context.secrets.get('ravoc.apiKey');
+          this._view?.webview.postMessage({
+            type: 'configLoaded',
+            lmUrl:    config.get<string>('lmUrl',   'http://localhost:1234/v1/chat/completions'),
+            lmModel:  config.get<string>('lmModel', 'qwen2.5-coder-7b-instruct'),
+            hasApiKey: !!apiKey,
+          });
         }
+
         if (message.type === 'sendMessage' && message.text) {
-          // Repassa a pergunta do usuário ao backend via WebSocket
-          this._ws?.send(JSON.stringify({ query: message.text }));
+          const config = vscode.workspace.getConfiguration('ravoc');
+          const apiKey = await this._context.secrets.get('ravoc.apiKey');
+
+          // Captura o editor no momento exato do envio para evitar contexto antigo.
+          const activeContext = this._getActiveEditorContext();
+          if (activeContext) {
+            this.notifyActiveFileChanged(
+              activeContext.filePath,
+              activeContext.language,
+              activeContext.content,
+            );
+          }
+
+          const activeFile = activeContext?.filePath || this._activeFile || undefined;
+          const activeLanguage = activeContext?.language || this._activeLanguage || undefined;
+          const activeFileContent = activeContext?.content || this._activeFileContent || undefined;
+
+          this._client.sendMessage({
+            message:         message.text,
+            history:         message.history ?? [],
+            project_id:      '',
+            lm_url:          config.get<string>('lmUrl',   'http://localhost:1234/v1/chat/completions'),
+            lm_model:        config.get<string>('lmModel', 'qwen2.5-coder-7b-instruct'),
+            lm_api_key:      apiKey ?? undefined,
+            active_file:     activeFile,
+            active_language: activeLanguage,
+            active_file_content: activeFileContent,
+          });
+        }
+
+        if (message.type === 'saveConfig') {
+          const config = vscode.workspace.getConfiguration('ravoc');
+
+          if (message.lmUrl) {
+            await config.update('lmUrl',   message.lmUrl,   vscode.ConfigurationTarget.Global);
+          }
+          if (message.lmModel) {
+            await config.update('lmModel', message.lmModel, vscode.ConfigurationTarget.Global);
+          }
+          if (message.apiKey) {
+            await this._context.secrets.store('ravoc.apiKey', message.apiKey);
+          }
+
+          this._view?.webview.postMessage({ type: 'configSaved' });
         }
       }
     );
 
-    // Quando o painel é fechado, limpar o WebSocket
     webviewView.onDidDispose(() => {
-      this._ws?.close();
-      this._ws = undefined;
+      this._view = undefined;
     });
   }
 
-  // Atualiza o arquivo ativo visível no painel
-  public notifyActiveFileChanged(filePath: string): void {
+  /**
+   * Chamado pelo RavocWatcher após debounce de 300ms.
+   * Atualiza o estado interno E notifica o webview para exibir o indicador.
+   */
+  public notifyActiveFileChanged(filePath: string, language: string = '', content: string = ''): void {
+    this._activeFile = filePath;
+    this._activeLanguage = language;
+    this._activeFileContent = content;
+
     this._view?.webview.postMessage({
       type: 'contextUpdate',
       activeFile: filePath,
+      activeLanguage: language,
     });
   }
 
-  private _connectWebSocket(): void {
-    const wsUrl = this._backendUrl.replace('http', 'ws') + '/chat';
+  private _getActiveEditorContext():
+    | { filePath: string; language: string; content: string }
+    | undefined {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor) {return undefined;}
 
-    try {
-      this._ws = new WebSocket(wsUrl);
+    const doc = editor.document;
+    if (doc.uri.scheme !== 'file' || doc.isUntitled) {return undefined;}
 
-      this._ws.onmessage = (event) => {
-        const data = JSON.parse(event.data as string) as {
-          chunk?: string;
-          done?: boolean;
-          error?: string;
-        };
+    const content = doc.getText();
 
-        if (data.chunk) {
-          // Chunk de streaming — envia ao React imediatamente
-          this._view?.webview.postMessage({ type: 'responseChunk', chunk: data.chunk });
-        }
-        if (data.done) {
-          // Sinal de fim de stream
-          this._view?.webview.postMessage({ type: 'response' });
-        }
-        if (data.error) {
-          this._view?.webview.postMessage({ type: 'error', text: data.error });
-        }
-      };
-
-      this._ws.onerror = () => {
-        this._view?.webview.postMessage({
-          type: 'error',
-          text: 'Não foi possível conectar ao RAVOC backend. Verifique se está rodando na porta 8000.',
-        });
-      };
-    } catch {
-      console.error('[RAVOC] Falha ao criar WebSocket');
-    }
+    return {
+      filePath: vscode.workspace.asRelativePath(doc.uri, false),
+      language: doc.languageId,
+      content: content.length > MAX_ACTIVE_FILE_CONTEXT_CHARS
+        ? content.slice(0, MAX_ACTIVE_FILE_CONTEXT_CHARS)
+        : content,
+    };
   }
 
-private _getHtmlContent(webview: vscode.Webview): string {
-  const scriptUri = webview.asWebviewUri(
-    vscode.Uri.joinPath(this._extensionUri, 'media', 'webview.js')
-  );
+  private _getHtmlContent(webview: vscode.Webview): string {
+    const scriptUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this._extensionUri, 'media', 'webview.js')
+    );
+    const styleUri = webview.asWebviewUri(
+      vscode.Uri.joinPath(this._extensionUri, 'media', 'webview.css')
+    );
+    const nonce = crypto.randomBytes(16).toString('hex');
 
-  // Adicione essa linha para o CSS
-  const styleUri = webview.asWebviewUri(
-    vscode.Uri.joinPath(this._extensionUri, 'media', 'webview.css')
-  );
+    const csp = [
+      `default-src 'none'`,
+      `script-src 'nonce-${nonce}'`,
+      `style-src ${webview.cspSource} 'unsafe-inline'`,
+      `img-src ${webview.cspSource} data:`,
+      `connect-src ws://localhost:7000 http://localhost:7000 https:`,
+      `font-src ${webview.cspSource}`,
+    ].join('; ');
 
-  const nonce = crypto.randomBytes(16).toString('hex');
-
-  const csp = [
-    `default-src 'none'`,
-    `script-src 'nonce-${nonce}'`,
-    `style-src ${webview.cspSource} 'unsafe-inline'`,
-    `img-src ${webview.cspSource} data:`,
-    `connect-src ws://localhost:8000 http://localhost:8000`,
-    `font-src ${webview.cspSource}`,
-  ].join('; ');
-
-  return `<!DOCTYPE html>
+    return `<!DOCTYPE html>
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta http-equiv="Content-Security-Policy" content="${csp}">
   <title>RAVOC</title>
-  <!-- CSS do Vite -->
   <link rel="stylesheet" href="${styleUri}">
   <style>
     *, *::before, *::after { box-sizing: border-box; }
@@ -149,5 +203,5 @@ private _getHtmlContent(webview: vscode.Webview): string {
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;
-}
+  }
 }
