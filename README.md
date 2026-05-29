@@ -59,10 +59,8 @@ O repositório é organizado de forma modular para separar a interface do editor
 🚧 **Em desenvolvimento (WIP - Work in Progress)**
 
 ### Próximos Passos
-- Finalizar a interface visual base da extensão no VS Code.
-- Estruturar os endpoints principais da API do backend.
-- Conectar o banco de dados via container Docker.
-- Implementar a rotina inicial de processamento e vetorização de texto.
+- Finalizar a implementação de modelos de IA, permitindo modelos da nuvem.
+- Iniciar o processo de estruturação da vetorização dos dados.
 
 ---
 
