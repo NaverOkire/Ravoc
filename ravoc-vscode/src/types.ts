@@ -10,10 +10,21 @@ export interface ChatMessage {
   content: string;
 }
 
+export type ProviderId =
+  | 'local_lm_studio'
+  | 'openai'
+  | 'anthropic'
+  | 'gemini'
+  | 'nvidia';
+
 export interface ChatRequest {
   message:          string;
   history:          ChatMessage[];
   project_id:       string;
+  provider_id?:     ProviderId;
+  model?:           string;
+  api_key?:         string;
+  cloud_enabled?:   boolean;
   lm_url:           string;
   lm_model:         string;
   lm_api_key?:      string;
@@ -22,8 +33,7 @@ export interface ChatRequest {
   active_file_content?: string;
 }
 
-export interface WsFrame {
-  type:     'token' | 'done' | 'error';
-  content:  string;   // para type=token
-  message:  string;   // para type=error
-}
+export type WsFrame =
+  | { type: 'token'; content: string }
+  | { type: 'done' }
+  | { type: 'error'; message: string };

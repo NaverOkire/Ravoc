@@ -8,7 +8,9 @@ export function activate(context: vscode.ExtensionContext) {
     logger.init(context);
     logger.info('Extensão ativada.');
 
-    const client = new RavocClient('http://localhost:7000');
+    const config = vscode.workspace.getConfiguration('ravoc');
+    const backendUrl = config.get<string>('backend.url', 'http://localhost:7000');
+    const client = new RavocClient(backendUrl);
     client.connect();
 
     context.subscriptions.push({

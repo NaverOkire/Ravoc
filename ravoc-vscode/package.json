@@ -38,6 +38,48 @@
           "icon": "media/ravoc-icon.svg"
         }
       ]
+    },
+    "configuration": {
+      "title": "RAVOC",
+      "properties": {
+        "ravoc.backend.url": {
+          "type": "string",
+          "default": "http://localhost:7000",
+          "description": "URL do backend RAVOC."
+        },
+        "ravoc.provider.default": {
+          "type": "string",
+          "default": "local_lm_studio",
+          "enum": [
+            "local_lm_studio",
+            "openai",
+            "anthropic",
+            "gemini",
+            "nvidia"
+          ],
+          "description": "Provider de LLM usado pelo chat."
+        },
+        "ravoc.model.default": {
+          "type": "string",
+          "default": "qwen2.5-coder-7b-instruct",
+          "description": "Modelo padrao enviado ao provider selecionado."
+        },
+        "ravoc.cloud.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Habilita envio explicito de contexto para providers de nuvem."
+        },
+        "ravoc.lmUrl": {
+          "type": "string",
+          "default": "http://localhost:1234/v1/chat/completions",
+          "description": "Endpoint local OpenAI-compatible usado pelo provider local."
+        },
+        "ravoc.lmModel": {
+          "type": "string",
+          "default": "qwen2.5-coder-7b-instruct",
+          "description": "Modelo local legado usado por LM Studio."
+        }
+      }
     }
   },
   "scripts": {

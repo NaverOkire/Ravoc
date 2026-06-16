@@ -1,48 +1,62 @@
-# ravoc/main.py
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel, Field, field_validator
+from __future__ import annotations
+
 import hashlib
 import json
 import re
-import httpx
+from typing import Any
+
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from pydantic import BaseModel, Field, field_validator
+
+from ravoc.config import build_provider_configs, settings
 from ravoc.db import get_client
 from ravoc.embedder import embed, embed_query
+from ravoc.llm import (
+    ChatContextBuilder,
+    ChatContextInput,
+    ChatHistoryMessage,
+    LLMRequest,
+    LLMRouter,
+)
 
 app = FastAPI(title="RAVOC API", version="0.1.0")
 
 PROMPT_VERSION = "ravoc-chat-pipeline-2026-05-29b"
-MAX_HISTORY_MESSAGES = 8
-MAX_HISTORY_CONTENT_CHARS = 2000
-MAX_ACTIVE_FILE_CONTEXT_CHARS = 12000
 
-# ── Schemas ──────────────────────────────────────────────────────────────────
+chat_context_builder = ChatContextBuilder(prompt_version=PROMPT_VERSION)
+llm_router = LLMRouter(
+    provider_configs=build_provider_configs(),
+    default_provider_id=settings.default_provider,
+)
 
 VALID_COLLECTIONS = {"code_context", "notes_context", "session_history"}
 VALID_CHUNK_TYPES = {"function", "class", "section", "root_object", "message"}
 
+
 class IngestRequest(BaseModel):
-    collection: str = Field(..., description="Nome da coleção alvo")
+    collection: str = Field(..., description="Nome da colecao alvo")
     documents: list[str] = Field(..., min_length=1, max_length=50)
     metadatas: list[dict] = Field(..., description="Metadados paralelos aos documentos")
 
     @field_validator("collection")
     @classmethod
-    def valid_collection(cls, v: str) -> str:
-        if v not in VALID_COLLECTIONS:
+    def valid_collection(cls, value: str) -> str:
+        if value not in VALID_COLLECTIONS:
             raise ValueError(f"collection deve ser uma de: {VALID_COLLECTIONS}")
-        return v
+        return value
 
     @field_validator("metadatas")
     @classmethod
-    def validate_metadata_schema(cls, v: list[dict]) -> list[dict]:
+    def validate_metadata_schema(cls, value: list[dict]) -> list[dict]:
         required = {"file_path", "project_id", "language", "chunk_type", "chunk_name", "timestamp"}
-        for i, meta in enumerate(v):
+        for index, meta in enumerate(value):
             missing = required - meta.keys()
             if missing:
-                raise ValueError(f"metadata[{i}] falta: {missing}")
+                raise ValueError(f"metadata[{index}] falta: {missing}")
             if meta["chunk_type"] not in VALID_CHUNK_TYPES:
-                raise ValueError(f"chunk_type inválido: {meta['chunk_type']}")
-        return v
+                raise ValueError(f"chunk_type invalido: {meta['chunk_type']}")
+        return value
+
 
 class QueryRequest(BaseModel):
     collection: str
@@ -53,14 +67,16 @@ class QueryRequest(BaseModel):
 
     @field_validator("collection")
     @classmethod
-    def valid_collection(cls, v: str) -> str:
-        if v not in VALID_COLLECTIONS:
+    def valid_collection(cls, value: str) -> str:
+        if value not in VALID_COLLECTIONS:
             raise ValueError(f"collection deve ser uma de: {VALID_COLLECTIONS}")
-        return v
+        return value
+
 
 class ChatMessage(BaseModel):
     role: str
     content: str
+
 
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1)
@@ -69,6 +85,11 @@ class ChatRequest(BaseModel):
     active_file_content: str | None = None
     history: list[ChatMessage] = Field(default_factory=list)
     project_id: str = ""
+    provider_id: str | None = None
+    model: str | None = None
+    api_key: str | None = None
+    cloud_enabled: bool | None = None
+    provider_options: dict[str, Any] = Field(default_factory=dict)
     lm_url: str = "http://localhost:1234/v1/chat/completions"
     lm_model: str | None = None
     lm_api_key: str | None = None
@@ -87,7 +108,6 @@ LANGUAGE_LABELS = {
     "markdown": "Markdown",
 }
 
-# ── Endpoints ────────────────────────────────────────────────────────────────
 
 @app.post("/ingest", status_code=201)
 async def ingest(req: IngestRequest):
@@ -95,14 +115,14 @@ async def ingest(req: IngestRequest):
     col = client.get_collection(req.collection)
 
     ids = []
-    for i, (doc, meta) in enumerate(zip(req.documents, req.metadatas)):
+    for doc, meta in zip(req.documents, req.metadatas):
         content_hash = hashlib.sha256(doc.encode()).hexdigest()
         meta["content_hash"] = content_hash
 
         existing = col.get(where={
             "$and": [
                 {"file_path": {"$eq": meta["file_path"]}},
-                {"chunk_name": {"$eq": meta["chunk_name"]}}
+                {"chunk_name": {"$eq": meta["chunk_name"]}},
             ]
         })
 
@@ -166,31 +186,13 @@ async def health():
     return {"status": "ok", "prompt_version": PROMPT_VERSION}
 
 
-def looks_corrupted(text: str) -> bool:
-    lowered = text.lower()
-    suspicious_fragments = (
-        "<|im_start|>",
-        "<|im_end|>",
-        "umaescreu",
-        "avavoc",
-        "perguntaunta",
-        "especificamenteente",
-        "ficare em em",
-        "você estáu",
-    )
-    if any(fragment in lowered for fragment in suspicious_fragments):
-        return True
-
-    if "````" in text:
-        return True
-
-    words = lowered.split()
-    if len(words) >= 12:
-        repeated = sum(1 for i in range(1, len(words)) if words[i] == words[i - 1])
-        if repeated / len(words) > 0.15:
-            return True
-
-    return False
+@app.get("/providers")
+async def providers():
+    return {
+        "default_provider": llm_router.default_provider_id,
+        "cloud_enabled": settings.cloud_enabled,
+        "providers": llm_router.list_public_providers(),
+    }
 
 
 def normalized(text: str) -> str:
@@ -211,7 +213,7 @@ def format_number(value: float) -> str:
 
 def simple_math_answer(message: str) -> str | None:
     match = re.search(
-        r"(-?\d+(?:[,.]\d+)?)\s*([+\-*/x×÷])\s*(-?\d+(?:[,.]\d+)?)",
+        r"(-?\d+(?:[,.]\d+)?)\s*([+\-*/x\u00d7\u00f7])\s*(-?\d+(?:[,.]\d+)?)",
         message,
     )
     if not match:
@@ -225,7 +227,7 @@ def simple_math_answer(message: str) -> str | None:
         result = left + right
     elif operator == "-":
         result = left - right
-    elif operator in {"*", "x", "×"}:
+    elif operator in {"*", "x", "\u00d7"}:
         result = left * right
     elif right == 0:
         return "Não é possível dividir por zero."
@@ -238,25 +240,6 @@ def simple_math_answer(message: str) -> str | None:
     )
 
 
-def question_needs_file_context(message: str) -> bool:
-    text = normalized(message)
-    file_terms = (
-        "arquivo",
-        "código",
-        "codigo",
-        "função",
-        "funcao",
-        "classe",
-        "linguagem",
-        "nome dele",
-        "nome do",
-        "neste",
-        "nesse",
-        "presente",
-    )
-    return any(term in text for term in file_terms)
-
-
 def deterministic_answer(req: ChatRequest) -> str | None:
     text = normalized(req.message)
     math_answer = simple_math_answer(req.message)
@@ -267,8 +250,8 @@ def deterministic_answer(req: ChatRequest) -> str | None:
     asks_name = "nome" in text and (
         "arquivo" in text
         or "dele" in text
-        or "código" in text
         or "codigo" in text
+        or "c\u00f3digo" in text
     )
 
     if req.active_file and (asks_language or asks_name):
@@ -280,36 +263,56 @@ def deterministic_answer(req: ChatRequest) -> str | None:
         answer = " e ".join(parts)
         return answer[:1].upper() + answer[1:] + "."
 
-    if text in {"olá", "ola", "oi"}:
+    if text in {"ol\u00e1", "ola", "oi"}:
         return "Olá! Como posso ajudar com o código?"
 
-    if text.replace(" ", "") in {"quantoé2+2", "quantoe2+2", "2+2", "olá,quantoé2+2", "ola,quantoe2+2"}:
+    compact = text.replace(" ", "")
+    if compact in {
+        "quanto\u00e92+2",
+        "quantoe2+2",
+        "2+2",
+        "ol\u00e1,quanto\u00e92+2",
+        "ola,quantoe2+2",
+    }:
         return "2 + 2 = 4."
 
     return None
 
 
-def clean_history(history: list[ChatMessage]) -> list[dict[str, str]]:
-    cleaned: list[dict[str, str]] = []
-    for msg in history[-MAX_HISTORY_MESSAGES:]:
-        if msg.role not in {"user", "assistant"}:
-            continue
+def build_llm_request(req: ChatRequest) -> tuple[LLMRequest, str | None, bool]:
+    messages = chat_context_builder.build(
+        ChatContextInput(
+            message=req.message,
+            active_file=req.active_file,
+            active_language=req.active_language,
+            active_file_content=req.active_file_content,
+            history=[
+                ChatHistoryMessage(role=msg.role, content=msg.content)
+                for msg in req.history
+            ],
+        )
+    )
+    allow_cloud = settings.cloud_enabled if req.cloud_enabled is None else req.cloud_enabled
+    provider = llm_router.get_provider(req.provider_id, allow_cloud=allow_cloud)
+    api_key = req.api_key or req.lm_api_key
 
-        content = msg.content.strip()
-        if not content:
-            continue
+    if provider.config.requires_api_key and not api_key:
+        raise ValueError(f"API key ausente para provider {provider.config.provider_id}")
 
-        if msg.role == "assistant" and looks_corrupted(content):
-            continue
+    return (
+        LLMRequest(
+            messages=messages,
+            model=req.model or req.lm_model,
+            api_key=api_key,
+            endpoint_url=req.lm_url if provider.config.capabilities.local else None,
+            temperature=0.2,
+            max_tokens=1024,
+            provider_options=req.provider_options,
+        ),
+        req.provider_id,
+        allow_cloud,
+    )
 
-        cleaned.append({
-            "role": msg.role,
-            "content": content[:MAX_HISTORY_CONTENT_CHARS],
-        })
-
-    return cleaned
-
-# ── WebSocket /chat ───────────────────────────────────────────────────────────
 
 @app.websocket("/chat")
 async def chat_ws(websocket: WebSocket):
@@ -328,85 +331,25 @@ async def chat_ws(websocket: WebSocket):
                 await websocket.send_text(json.dumps({"type": "done"}))
                 continue
 
-            include_file_context = question_needs_file_context(req.message)
-            active_file_context = ""
-            if req.active_file and include_file_context:
-                active_file_context = (
-                    "\n\nContexto do editor aberto:"
-                    f"\n- arquivo: {req.active_file}"
-                    f"\n- linguagem detectada: {req.active_language or 'desconhecida'}"
-                )
-                if req.active_file_content:
-                    active_file_context += (
-                        "\n\nConteúdo do arquivo ativo:\n"
-                        f"```{req.active_language or ''}\n"
-                        f"{req.active_file_content[:MAX_ACTIVE_FILE_CONTEXT_CHARS]}\n"
-                        "```"
+            llm_request, provider_id, allow_cloud = build_llm_request(req)
+            provider = llm_router.get_provider(provider_id, allow_cloud=allow_cloud)
+
+            async for event in provider.stream_chat(llm_request):
+                if event.type == "token" and event.content:
+                    await websocket.send_text(
+                        json.dumps({"type": "token", "content": event.content})
                     )
-
-            messages = [
-                {
-                    "role": "system",
-                    "content": (
-                        f"[{PROMPT_VERSION}]\n"
-                        "Você é o RAVOC, um assistente de desenvolvimento local. "
-                        "Responda de forma direta, técnica e em português. "
-                        "Não invente nomes de arquivos: se houver arquivo ativo, use exatamente o caminho informado. "
-                        "Se houver linguagem detectada no contexto, prefira essa informação ao inferir pela conversa. "
-                        "Se a pergunta for geral, responda diretamente sem forçar relação com o arquivo aberto. "
-                        "Se a pergunta mencionar este arquivo, o código, a linguagem ou o contexto atual, "
-                        "use o contexto do editor aberto abaixo. "
-                        "Nunca escreva tokens de template como <|im_start|> ou <|im_end|>."
-                        + active_file_context
-                    )
-                },
-                *clean_history(req.history),
-                {"role": "user", "content": req.message},
-            ]
-
-            # Headers dinâmicos — só inclui Authorization se houver API key
-            headers = {"Content-Type": "application/json"}
-            if req.lm_api_key:
-                headers["Authorization"] = f"Bearer {req.lm_api_key}"
-
-            async with httpx.AsyncClient(timeout=120.0) as http:
-                async with http.stream(
-                    "POST",
-                    req.lm_url,                          # ← URL do provider
-                    headers=headers,
-                    json={
-                        "model": req.lm_model,           # ← modelo do provider (None = deixa o servidor decidir)
-                        "messages": messages,
-                        "stream": True,
-                        "temperature": 0.2,
-                        "max_tokens": 1024,
-                        "stop": ["<|im_start|>", "<|im_end|>"],
-                    }
-                ) as response:
-                    async for line in response.aiter_lines():
-                        if not line.startswith("data: "):
-                            continue
-                        payload = line[6:]
-                        if payload == "[DONE]":
-                            break
-                        try:
-                            chunk = json.loads(payload)
-                            token = chunk["choices"][0]["delta"].get("content", "")
-                            if token:
-                                await websocket.send_text(
-                                    json.dumps({"type": "token", "content": token})
-                                )
-                        except (json.JSONDecodeError, KeyError):
-                            continue
+                elif event.type == "done":
+                    break
 
             await websocket.send_text(json.dumps({"type": "done"}))
 
     except WebSocketDisconnect:
         pass
-    except Exception as e:
+    except Exception as exc:
         try:
             await websocket.send_text(
-                json.dumps({"type": "error", "message": str(e)})
+                json.dumps({"type": "error", "message": str(exc)})
             )
         except Exception:
             pass
