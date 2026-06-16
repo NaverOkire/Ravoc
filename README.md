@@ -59,7 +59,7 @@ O repositório é organizado de forma modular para separar a interface do editor
 🚧 **Em desenvolvimento (WIP - Work in Progress)**
 
 ### Próximos Passos
-- Finalizar a implementação de modelos de IA, permitindo modelos da nuvem.
+
 - Iniciar o processo de estruturação da vetorização dos dados.
 
 ---
